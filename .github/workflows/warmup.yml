@@ -1,0 +1,51 @@
+name: warmup
+
+# Warms up GitHub Actions for this organization: every 2 hours, starts one more parallel job
+# than succeeded in the previous run (n + 1). Each job only waits 60 seconds.
+# Warm-up is done once a run had 20 successful parallel jobs: the workflow then disables itself.
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write # read the previous run's jobs, and disable this workflow when warm-up is done
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      jobs: ${{ steps.count.outputs.jobs }}
+      done: ${{ steps.count.outputs.done }}
+    steps:
+      - id: count
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # latest finished run of this workflow; none on the first run
+          prev=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/warmup.yml/runs?status=completed&per_page=1" --jq '.workflow_runs[0].id // empty')
+          n=0
+          if [ -n "$prev" ]; then
+            n=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$prev/jobs?per_page=100" \
+              --jq '.jobs[] | select(.name | startswith("warm")) | select(.conclusion == "success") | .id' | wc -l)
+          fi
+          if [ "$n" -ge 20 ]; then
+            echo "Previous run $prev: $n warm jobs succeeded; warm-up done, disabling this workflow"
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/warmup.yml/disable"
+            echo "done=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          total=$(( n + 1 > 20 ? 20 : n + 1 ))
+          echo "Previous run ${prev:-none}: $n warm jobs succeeded; starting $total"
+          echo "jobs=$(jq -cn "[range($total)]")" >> "$GITHUB_OUTPUT"
+
+  warm:
+    needs: plan
+    if: needs.plan.outputs.done != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        i: ${{ fromJSON(needs.plan.outputs.jobs) }}
+    steps:
+      - run: node -e "setTimeout(() => {}, 60000)"
